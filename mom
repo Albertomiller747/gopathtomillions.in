@@ -1,0 +1,74 @@
+// server.js - Modified for two products; host on Render/Vercel/etc.
+
+require('dotenv').config();
+const express = require('express');
+const fetch = (...args) => import('node-fetch').then(m => m.default(...args));
+const bodyParser = require('body-parser');
+const crypto = require('crypto');
+
+const app = express();
+app.use(bodyParser.json());
+
+const PRODUCT1_ID = 'rcdueg'; // Password #1 equivalent
+const PRODUCT2_ID = 'feaooh'; // Password #2 equivalent
+const GUMROAD_WEBHOOK_SECRET = process.env.GUMROAD_WEBHOOK_SECRET || 'your_webhook_secret_here';
+
+async function verifyLicense(key, productId) {
+    const form = new URLSearchParams();
+    form.append('product_id', productId);
+    form.append('license_key', key);
+    form.append('increment_uses_count', 'false'); // Avoid incrementing uses on each check
+
+    const resp = await fetch('https://api.gumroad.com/v2/licenses/verify', {
+        method: 'POST',
+        body: form
+    });
+    return await resp.json();
+}
+
+app.post('/api/verify-key', async (req, res) => {
+    try {
+        const { license_key } = req.body;
+        if (!license_key) return res.status(400).json({ valid: false, reason: 'no_key' });
+
+        // Try Product 1
+        let json = await verifyLicense(license_key, PRODUCT1_ID);
+        let type = null;
+
+        if (json.success) {
+            type = '1';
+        } else {
+            // Try Product 2
+            json = await verifyLicense(license_key, PRODUCT2_ID);
+            if (json.success) type = '2';
+        }
+
+        if (!type) return res.json({ valid: false, reason: 'invalid_key' });
+
+        const p = json.purchase || {};
+
+        if (p.refunded || p.chargebacked) return res.json({ valid: false, reason: 'refunded' });
+
+        if (p.subscription_ended_at || p.subscription_cancelled_at || p.subscription_failed_at) {
+            const ended = new Date(p.subscription_ended_at || p.subscription_cancelled_at || p.subscription_failed_at);
+            if (ended <= new Date()) return res.json({ valid: false, reason: 'subscription_ended' });
+        }
+
+        return res.json({ valid: true, type, purchase: p });
+    } catch (err) {
+        console.error('Error:', err);
+        res.status(500).json({ valid: false, reason: 'server_error' });
+    }
+});
+
+// Webhook endpoint (optional, for real-time invalidations if using a DB)
+app.post('/api/gumroad-webhook', bodyParser.raw({ type: '*/*' }), (req, res) => {
+    // Similar to original; add DB logic if needed
+    // ...
+    res.status(200).send('ok');
+});
+
+app.get('/', (req, res) => res.send('Verifier running'));
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Listening on ${PORT}`));
